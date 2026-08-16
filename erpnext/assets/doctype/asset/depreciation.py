@@ -415,6 +415,7 @@ def get_last_depreciation_date(asset_name):
 		.where(depreciation.docstatus == 1)
 		.where(depreciation_schedule.journal_entry != "")
 		.orderby(depreciation_schedule.schedule_date, order=Order.desc)
+		.orderby(depreciation_schedule.name, order=Order.desc)
 		.limit(1)
 		.run()
 	)

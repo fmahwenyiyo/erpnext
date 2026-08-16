@@ -92,16 +92,21 @@ def import_genericode(code_list: str, file_name: str, column_map: dict, filters:
 	file_doc.check_permission("read")
 	root = parse_genericode_content(file_doc.get_content(encodings=()))
 
-	# Construct the XPath expression
+	# Construct the XPath expression. column_ref/value come from a whitelisted method argument, so
+	# they are bound as XPath variables ($colN/$valN) rather than interpolated into the expression
+	# string - a quote in either would otherwise let a caller alter which Rows the filter matches.
 	xpath_expr = ".//SimpleCodeList/Row"
-	filter_conditions = [
-		f"Value[@ColumnRef='{column_ref}']/SimpleValue='{value}'"
-		for column_ref, value in (filters or {}).items()
-	]
+	xpath_variables = {}
+	filter_conditions = []
+	for i, (column_ref, value) in enumerate((filters or {}).items()):
+		col_var, val_var = f"col{i}", f"val{i}"
+		xpath_variables[col_var] = column_ref
+		xpath_variables[val_var] = value
+		filter_conditions.append(f"Value[@ColumnRef=${col_var}]/SimpleValue=${val_var}")
 	if filter_conditions:
 		xpath_expr += "[" + " and ".join(filter_conditions) + "]"
 
-	elements = root.xpath(xpath_expr)
+	elements = root.xpath(xpath_expr, **xpath_variables)
 	total_elements = len(elements)
 	for i, xml_element in enumerate(elements, start=1):
 		common_code: CommonCode = frappe.new_doc("Common Code")

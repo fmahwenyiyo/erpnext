@@ -23,3 +23,11 @@ node_modules/
 # Banking SPA
 erpnext/public/banking
 erpnext/www/banking.html
+
+# Local secrets / Docker Compose env — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Local backups written by docs/BACKUP_RESTORE.md procedures
+/backups/

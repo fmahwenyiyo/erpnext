@@ -21,13 +21,14 @@ def create_prospect_against_crm_deal():
 	prospect.website = doc.website
 	prospect.annual_revenue = doc.annual_revenue
 
+	frappe.db.savepoint("crm_create_prospect")
 	try:
 		prospect_name = frappe.db.get_value("Prospect", {"company_name": prospect.company_name})
 		if not prospect_name:
 			prospect.insert()
 			prospect_name = prospect.name
 	except Exception:
-		frappe.db.rollback()
+		frappe.db.rollback(save_point="crm_create_prospect")
 		frappe.log_error(
 			frappe.get_traceback(),
 			f"Error while creating prospect against CRM Deal: {frappe.form_dict.get('crm_deal_id')}",

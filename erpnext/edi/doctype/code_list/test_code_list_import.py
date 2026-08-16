@@ -141,6 +141,51 @@ class TestCodeListImport(ERPNextTestSuite):
 			"Alpha",
 		)
 
+	def test_process_genericode_import_applies_filters(self):
+		self.set_upload_context(content=SAMPLE_GENERICODE, file_name="uploaded_genericode.xml")
+
+		import_result = code_list_import.import_genericode()
+		count = code_list_import.process_genericode_import(
+			code_list_name=import_result["code_list"],
+			file_name=import_result["file"],
+			code_column="code",
+			title_column="name",
+			filters={"category": "Group 1"},
+		)
+
+		self.assertEqual(count, 2)
+		self.assertEqual(
+			set(
+				frappe.db.get_list(
+					"Common Code",
+					filters={"code_list": import_result["code_list"]},
+					pluck="common_code",
+				)
+			),
+			{"A", "C"},
+		)
+
+	def test_process_genericode_import_filter_value_is_not_xpath_injectable(self):
+		"""A `filters` value is bound as an XPath variable, not string-interpolated into the
+		expression - a quote in a filter value must not let it match rows the filter was meant to
+		exclude (see docs/SECURITY_REVIEW.md)."""
+		self.set_upload_context(content=SAMPLE_GENERICODE, file_name="uploaded_genericode.xml")
+
+		import_result = code_list_import.import_genericode()
+		count = code_list_import.process_genericode_import(
+			code_list_name=import_result["code_list"],
+			file_name=import_result["file"],
+			code_column="code",
+			title_column="name",
+			filters={"category": "Group 1' or '1'='1"},
+		)
+
+		# The malicious value matches no real SimpleValue, so nothing should be imported - if this
+		# were still string-interpolated into the XPath expression, `or '1'='1'` would make the
+		# predicate always true and all 3 rows (including "Group 2") would import instead.
+		self.assertEqual(count, 0)
+		self.assertEqual(frappe.db.count("Common Code", {"code_list": import_result["code_list"]}), 0)
+
 	def test_import_genericode_from_local_file_url(self):
 		source_file = frappe.get_doc(
 			{

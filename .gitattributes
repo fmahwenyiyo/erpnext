@@ -1,0 +1,7 @@
+# Scripts and config that get COPY'd into Linux containers must keep LF line endings even when
+# checked out on Windows (core.autocrlf=true would otherwise rewrite them to CRLF, which breaks
+# the `#!/bin/bash` shebang and shell parsing inside the container at build/run time).
+*.sh text eol=lf
+Containerfile text eol=lf
+docker-compose*.yml text eol=lf
+*.conf text eol=lf

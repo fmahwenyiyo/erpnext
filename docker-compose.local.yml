@@ -1,0 +1,259 @@
+# Local development/test stack for THIS checkout, backed by PostgreSQL.
+#
+# Unlike the version this file replaced, every app-role service BUILDS from this repository's
+# actual source (see Containerfile) instead of pulling the prebuilt upstream frappe/erpnext image
+# — the previous version pulled `frappe/erpnext:v16.31.1`, a different major version than this
+# checkout's 17.x.x-develop, so it never actually exercised this repo's code or any local fix.
+# See docs/FORK_CHANGES.md.
+#
+# Usage:
+#   cp .env.example .env   # then edit POSTGRES_PASSWORD / ADMIN_PASSWORD
+#   docker compose -f docker-compose.local.yml up --build -d
+#   docker compose -f docker-compose.local.yml logs -f create-site   # watch site creation
+#   open http://localhost:${HTTP_PUBLISH_PORT:-8080}   (Administrator / $ADMIN_PASSWORD)
+#
+# This is a LOCAL/dev topology (single Postgres instance, no TLS, ports published to the host).
+# See DEPLOYMENT.md for production hardening on top of the same Containerfile/images.
+
+x-erpnext-image: &erpnext-image
+  build:
+    context: .
+    dockerfile: Containerfile
+    args:
+      FRAPPE_BRANCH: develop
+  image: erpnext-local:develop
+  networks:
+    - frappe_network
+
+x-erpnext-bench-volumes: &erpnext-bench-volumes
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
+services:
+  backend:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: unless-stopped
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-erpnextlocal}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      DB_TYPE: postgres
+      REDIS_CACHE: ${REDIS_CACHE:-redis-cache:6379}
+      REDIS_QUEUE: ${REDIS_QUEUE:-redis-queue:6379}
+      SOCKETIO_PORT: ${SOCKETIO_PORT:-9000}
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/method/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  configurator:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      REDIS_CACHE: ${REDIS_CACHE:-redis-cache:6379}
+      REDIS_QUEUE: ${REDIS_QUEUE:-redis-queue:6379}
+      SOCKETIO_PORT: ${SOCKETIO_PORT:-9000}
+
+  create-site:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      configurator:
+        condition: service_completed_successfully
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        wait-for-it -t 120 db:5432;
+        wait-for-it -t 120 redis-cache:6379;
+        wait-for-it -t 120 redis-queue:6379;
+        export start=`date +%s`;
+        until [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty"` ]];
+        do
+          echo "Waiting for sites/common_site_config.json to be created";
+          sleep 5;
+          if (( `date +%s`-start > 120 )); then
+            echo "could not find sites/common_site_config.json with required keys";
+            exit 1
+          fi
+        done;
+        echo "sites/common_site_config.json found";
+        if [ -d "sites/$$SITE_NAME" ]; then
+          echo "Site $$SITE_NAME already exists, skipping creation";
+        else
+          bench new-site --db-type postgres --db-host db --db-name "$$POSTGRES_DB" \
+            --db-password "$$POSTGRES_PASSWORD" --db-root-username "$$POSTGRES_USER" \
+            --db-root-password "$$POSTGRES_PASSWORD" --admin-password "$$ADMIN_PASSWORD" \
+            --install-app erpnext --set-default "$$SITE_NAME";
+        fi;
+    environment:
+      SITE_NAME: ${SITE_NAME:-frontend}
+      POSTGRES_DB: ${POSTGRES_DB:-erpnextlocal}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+
+  db:
+    image: postgres:16
+    networks:
+      - frappe_network
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-erpnextlocal}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # UTF-8 + a timezone-aware cluster; ERPNext expects UTC-stored timestamps.
+      PGTZ: UTC
+      TZ: UTC
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_HOST_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-erpnextlocal}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  frontend:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: unless-stopped
+    depends_on:
+      - websocket
+      - backend
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-frontend}
+      SOCKETIO: websocket:${SOCKETIO_PORT:-9000}
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
+    ports:
+      - "${HTTP_PUBLISH_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/method/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  queue-long:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: unless-stopped
+    command:
+      - bench
+      - worker
+      - --queue
+      - long,default,short
+    environment:
+      FRAPPE_REDIS_CACHE: redis://${REDIS_CACHE:-redis-cache:6379}
+      FRAPPE_REDIS_QUEUE: redis://${REDIS_QUEUE:-redis-queue:6379}
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  queue-short:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: unless-stopped
+    command:
+      - bench
+      - worker
+      - --queue
+      - short,default
+    environment:
+      FRAPPE_REDIS_CACHE: redis://${REDIS_CACHE:-redis-cache:6379}
+      FRAPPE_REDIS_QUEUE: redis://${REDIS_QUEUE:-redis-queue:6379}
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  redis-queue:
+    image: redis:6.2-alpine
+    networks:
+      - frappe_network
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-cache:
+    image: redis:6.2-alpine
+    networks:
+      - frappe_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scheduler:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: unless-stopped
+    command:
+      - bench
+      - schedule
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  websocket:
+    <<: [*erpnext-image, *erpnext-bench-volumes]
+    restart: unless-stopped
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      FRAPPE_REDIS_CACHE: redis://${REDIS_CACHE:-redis-cache:6379}
+      FRAPPE_REDIS_QUEUE: redis://${REDIS_QUEUE:-redis-queue:6379}
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+volumes:
+  db-data:
+  redis-queue-data:
+  sites:
+  logs:
+
+networks:
+  frappe_network:
+    driver: bridge

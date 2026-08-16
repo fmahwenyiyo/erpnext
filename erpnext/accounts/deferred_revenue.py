@@ -188,6 +188,7 @@ def get_booking_dates(doc, item, posting_date=None, prev_posting_date=None):
 				& (jea.docstatus < 2)
 			)
 			.orderby(je.posting_date, order=frappe.qb.desc)
+			.orderby(je.name, order=frappe.qb.desc)
 			.limit(1)
 			.run(as_dict=True)
 		)
